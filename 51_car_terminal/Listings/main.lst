@@ -1,0 +1,238 @@
+C51 COMPILER V9.54   MAIN                                                                  04/06/2026 18:52:56 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\Objects\main.obj
+COMPILER INVOKED BY: D:\KEIL5\Keil5 C51\C51\BIN\C51.EXE main.c OPTIMIZE(8,SPEED) BROWSE DEBUG OBJECTEXTEND PRINT(.\Listi
+                    -ngs\main.lst) OBJECT(.\Objects\main.obj)
+
+line level    source
+
+   1          #include <REGX52.H>
+   2          
+   3          // 延时函数（毫秒）
+   4          void Delay(unsigned int xms)
+   5          {
+   6   1          unsigned char i, j;
+   7   1          while(xms--)
+   8   1          {
+   9   2              i = 2;
+  10   2              j = 239;
+  11   2              do
+  12   2              {
+  13   3                  while (--j);
+  14   3              } while (--i);
+  15   2          }
+  16   1      }
+  17          
+  18          // 电机控制引脚
+  19          sbit ENA    = P2^0;
+  20          sbit IN1    = P2^2;
+  21          sbit IN2    = P2^3;
+  22          sbit IN3    = P2^4;
+  23          sbit IN4    = P2^5;
+  24          sbit ENB    = P2^1;
+  25          
+  26          // 红外传感器引脚（1=黑线，0=白线）
+  27          sbit LEFT1  = P0^1;
+  28          sbit LEFT2  = P0^2;
+  29          sbit RIGHT1 = P0^0;
+  30          sbit RIGHT2 = P0^3;
+  31          
+  32          // PWM相关变量
+  33          unsigned char PWMA, PWMB, i, j;
+  34          
+  35          // 抖动检测相关变量
+  36          unsigned char last_sensor_state = 0xFF;
+  37          unsigned char jitter_count = 0;
+  38          unsigned char straight_hold_time = 0;
+  39          #define JITTER_THRESHOLD 3
+  40          
+  41          // 定时器1初始化（50ms中断）
+  42          void Timer1_Init(void)
+  43          {
+  44   1          TMOD |= 0x10;
+  45   1          TH1 = 0x4C;
+  46   1          TL1 = 0x00;
+  47   1          ET1 = 1;
+  48   1          EA = 1;
+  49   1          TR1 = 1;
+  50   1      }
+  51          
+  52          // 定时器1中断服务程序（50ms）
+  53          void Timer1_ISR(void) interrupt 3
+  54          {
+C51 COMPILER V9.54   MAIN                                                                  04/06/2026 18:52:56 PAGE 2   
+
+  55   1          TH1 = 0x4C;
+  56   1          TL1 = 0x00;
+  57   1          if (straight_hold_time > 0) straight_hold_time--;
+  58   1      }
+  59          
+  60          // 定时器0初始化（PWM）
+  61          void Timer0Init(void)
+  62          {
+  63   1          TMOD &= 0xF0;
+  64   1          TMOD |= 0x01;
+  65   1          TL0 = 0x18;
+  66   1          TH0 = 0xFC;
+  67   1          TF0 = 0;
+  68   1          TR0 = 1;
+  69   1          ET0 = 1;
+  70   1          EA = 1;
+  71   1          PT0 = 0;
+  72   1      }
+  73          
+  74          // 定时器0中断（PWM输出）
+  75          void T0_PWM() interrupt 1
+  76          {
+  77   1          TL0 = 0x18;
+  78   1          TH0 = 0xFC;
+  79   1          i++;
+  80   1          j++;
+  81   1          if (i < PWMA) ENA = 1; else ENA = 0;
+  82   1          if (i >= 30) i = 0;
+  83   1          if (j < PWMB) ENB = 1; else ENB = 0;
+  84   1          if (j >= 30) j = 0;
+  85   1      }
+  86          
+  87          // 运动函数
+  88          void straight(void)
+  89          {
+  90   1          IN1 = 1; IN2 = 0;
+  91   1          PWMA = 6;
+  92   1          IN3 = 1; IN4 = 0;
+  93   1          PWMB = 6;
+  94   1      }
+  95          
+  96          void turnleft(void)
+  97          {
+  98   1          IN1 = 0; IN2 = 1;
+  99   1          PWMA = 8;
+ 100   1          IN3 = 1; IN4 = 0;
+ 101   1          PWMB = 15;
+ 102   1      }
+ 103          
+ 104          void turnright(void)
+ 105          {
+ 106   1          IN1 = 1; IN2 = 0;
+ 107   1          PWMA = 10;
+ 108   1          IN3 = 0; IN4 = 1;
+ 109   1          PWMB = 16;
+ 110   1      }
+ 111          
+ 112          void turnleft_big(void)
+ 113          {
+ 114   1          IN1 = 0; IN2 = 1;
+ 115   1          PWMA = 15;
+ 116   1          IN3 = 1; IN4 = 0;
+C51 COMPILER V9.54   MAIN                                                                  04/06/2026 18:52:56 PAGE 3   
+
+ 117   1          PWMB = 23;
+ 118   1      }
+ 119          
+ 120          void turnright_big(void)
+ 121          {
+ 122   1          IN1 = 1; IN2 = 0;
+ 123   1          PWMA = 23;
+ 124   1          IN3 = 0; IN4 = 1;
+ 125   1          PWMB = 15;
+ 126   1      }
+ 127          
+ 128          // 寻迹控制（1=黑线，0=白线）
+ 129          void Track(void)
+ 130          {
+ 131   1          // 合成当前传感器状态（用于抖动检测）
+ 132   1          unsigned char cur_state = 0;
+ 133   1          if (LEFT1) cur_state |= 0x08;   // 左内侧
+ 134   1          if (LEFT2) cur_state |= 0x04;   // 左外侧
+ 135   1          if (RIGHT1) cur_state |= 0x02;  // 右内侧
+ 136   1          if (RIGHT2) cur_state |= 0x01;  // 右外侧
+ 137   1      
+ 138   1          // 抖动检测
+ 139   1          if (cur_state != last_sensor_state)
+ 140   1          {
+ 141   2              jitter_count++;
+ 142   2              if (jitter_count >= JITTER_THRESHOLD)
+ 143   2              {
+ 144   3                  straight_hold_time = 10;   // 强制直行0.5秒
+ 145   3                  jitter_count = 0;
+ 146   3              }
+ 147   2          }
+ 148   1          else
+ 149   1          {
+ 150   2              if (jitter_count > 0) jitter_count--;
+ 151   2          }
+ 152   1          last_sensor_state = cur_state;
+ 153   1      
+ 154   1          // 强制直行优先
+ 155   1          if (straight_hold_time > 0)
+ 156   1          {
+ 157   2              straight();
+ 158   2              return;
+ 159   2          }
+ 160   1      
+ 161   1          // ---------- 以下所有传感器判断均基于 1=黑线 ----------
+ 162   1          // 全黑线（四个传感器都检测到黑线）→ 直行
+ 163   1          if (LEFT1 == 1 && RIGHT1 == 1 && LEFT2 == 1 && RIGHT2 == 1)
+ 164   1          {
+ 165   2              straight();
+ 166   2          }
+ 167   1      
+ 168   1          // 十字路口 / 特殊路况（多数传感器为黑线，少量白线）
+ 169   1          if ((LEFT1 == 1 && RIGHT1 == 0 && LEFT2 == 0 && RIGHT2 == 0)   // 只有左内侧黑，其他白
+ 170   1           || (LEFT1 == 0 && RIGHT1 == 1 && LEFT2 == 0 && RIGHT2 == 0)   // 只有右内侧黑
+ 171   1           || (LEFT1 == 0 && RIGHT1 == 0 && LEFT2 == 1 && RIGHT2 == 0)   // 只有左外侧黑
+ 172   1           || (LEFT1 == 0 && RIGHT1 == 0 && LEFT2 == 0 && RIGHT2 == 1)   // 只有右外侧黑
+ 173   1           || (LEFT1 == 1 && RIGHT1 == 1 && LEFT2 == 0 && RIGHT2 == 0))  // 两内侧黑，外侧白
+ 174   1          {
+ 175   2              straight();
+ 176   2              Delay(30);
+ 177   2          }
+ 178   1      
+C51 COMPILER V9.54   MAIN                                                                  04/06/2026 18:52:56 PAGE 4   
+
+ 179   1          // 小转弯（一侧内侧传感器偏离黑线）
+ 180   1          if (LEFT1 == 0 && RIGHT1 == 1 && LEFT2 == 1 && RIGHT2 == 1)   // 左内侧白，其他黑 → 左转
+ 181   1          {
+ 182   2              turnleft();
+ 183   2          }
+ 184   1          if (LEFT1 == 1 && RIGHT1 == 0 && LEFT2 == 1 && RIGHT2 == 1)   // 右内侧白，其他黑 → 右转
+ 185   1          {
+ 186   2              turnright();
+ 187   2          }
+ 188   1      
+ 189   1          // 大转弯（一侧外侧传感器偏离黑线）
+ 190   1          if (LEFT1 == 1 && RIGHT1 == 1 && LEFT2 == 0 && RIGHT2 == 1)   // 左外侧白，其他黑 → 左大转
+ 191   1          {
+ 192   2              turnleft_big();
+ 193   2          }
+ 194   1          if (LEFT1 == 1 && RIGHT1 == 1 && LEFT2 == 1 && RIGHT2 == 0)   // 右外侧白，其他黑 → 右大转
+ 195   1          {
+ 196   2              turnright_big();
+ 197   2          }
+ 198   1      }
+ 199          
+ 200          void main(void)
+ 201          {
+ 202   1          Timer1_Init();
+ 203   1          Timer0Init();
+ 204   1          while (1)
+ 205   1          {
+ 206   2              Track();
+ 207   2          }
+ 208   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    449    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =      7    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
